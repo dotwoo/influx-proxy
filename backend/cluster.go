@@ -333,14 +333,16 @@ func (ic *InfluxCluster) GetBackends(key string) (backends []BackendAPI, ok bool
 	defer ic.lock.RUnlock()
 
 	backends, ok = ic.m2bs[key]
+	if ok {
+		return
+	}
 	// match use prefix
-	if !ok {
-		for k, v := range ic.m2bs {
-			if strings.HasPrefix(key, k) {
-				backends = v
-				ok = true
-				break
-			}
+	subkeys := strings.Split(key, ".")
+	for i := len(subkeys) - 1; i > 0; i-- {
+		subkey := strings.Join(subkeys[:i], "-")
+		backends, ok = ic.m2bs[subkey]
+		if ok {
+			return
 		}
 	}
 	return
