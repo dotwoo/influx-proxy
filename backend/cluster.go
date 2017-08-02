@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"regexp"
@@ -26,6 +27,10 @@ var (
 	ErrBackendNotExist = errors.New("use a backend not exists")
 	ErrQueryForbidden  = errors.New("query forbidden")
 )
+
+func init() {
+	rand.Seed(time.Now().UnixNano())
+}
 
 func ScanKey(pointbuf []byte) (key string, err error) {
 	var keybuf [100]byte
@@ -127,7 +132,6 @@ func NewInfluxCluster(cfgsrc *RedisConfigSource, nodecfg *NodeConfig) (ic *Influ
 		panic(err)
 		return
 	}
-
 	// feature
 	go ic.statistics()
 	return
@@ -348,6 +352,29 @@ func (ic *InfluxCluster) GetBackends(key string) (backends []BackendAPI, ok bool
 	return
 }
 
+func (ic *InfluxCluster) RandomOne(key string) (backends []BackendAPI, ok bool) {
+	var backendName string
+	var backend BackendAPI
+	i := int(float32(len(ic.backends)) * rand.Float32())
+	for backendName, backend = range ic.backends {
+		if i == 0 {
+			break
+		} else {
+			i--
+		}
+	}
+	err := ic.cfgsrc.client.LPush("m:"+key, backendName).Err()
+	if err != nil {
+		return
+	}
+
+	ic.lock.Lock()
+	defer ic.lock.Unlock()
+	backends = []BackendAPI{backend}
+	ic.m2bs[key] = backends
+	return backends, true
+}
+
 func (ic *InfluxCluster) Query(w http.ResponseWriter, req *http.Request) (err error) {
 	atomic.AddInt64(&ic.stats.QueryRequests, 1)
 	defer func(start time.Time) {
@@ -460,12 +487,16 @@ func (ic *InfluxCluster) WriteRow(line []byte) {
 	bs, ok := ic.GetBackends(key)
 	if !ok {
 		log.Printf("new measurement: %s\n", key)
-		atomic.AddInt64(&ic.stats.PointsWrittenFail, 1)
-		// TODO: new measurement?
+		bs, ok = ic.RandomOne(key)
+		if !ok {
+			log.Printf("new measurement create map error: %s\n", key)
+			atomic.AddInt64(&ic.stats.PointsWrittenFail, 1)
+			return
+		}
 		return
 	}
 
-	// don't block here for a lont time, we just have one worker.
+	// don't block here for a long time, we just have one worker.
 	for _, b := range bs {
 		err = b.Write(line)
 		if err != nil {
